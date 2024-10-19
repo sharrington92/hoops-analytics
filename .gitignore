@@ -1,0 +1,17 @@
+# Ignore everything
+*
+
+# Allow only specific file types
+!*.R
+!*.r
+!*.Rmd
+!*.rmd
+!*.qmd
+!*.py
+!*.sql
+!*.txt
+!*.gitignore
+
+# Allow directories to be tracked (needed for git to track files within directories)
+!*/
+
