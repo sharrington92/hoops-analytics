@@ -34,9 +34,9 @@ dates <- seq.Date(
 )
 
 team_ids_input <- read_lines(
-  file.path("data", "html-extract-ncaa-team-ids.txt"),
-  skip = 0
-) %>% 
+    file.path("data", "html-extract-ncaa-team-ids.txt"),
+    skip = 0
+  ) %>% 
   as_tibble() %>% 
   mutate(
     team_id = str_extract(value, '(?<=value=\\")([0-9]+)'),
@@ -47,8 +47,10 @@ team_ids_input <- read_lines(
     y = ncaahoopR::ncaa_colors %>% 
       select(-c(color_3, conference)),
     by = "ncaa_name"
-  )
-
+  ) %>% 
+  group_by(ncaa_name) %>% 
+  slice_min(order_by = as.numeric(team_id), n = 1) %>% 
+  ungroup()
 
 
 
@@ -211,17 +213,15 @@ dbSendQuery(
   duck.con,
   "CREATE TABLE IF NOT EXISTS team_season (
     team_seas_id INT PRIMARY KEY,
+    season_id INT,
     team_id INT,
-    season_id,
     conf TEXT,
-    
-    FOREIGN REFERENCE (team_id) REFERENCES teams (team_id),
-    FOREIGN REFERENCE (season_id) REFERENCES seasons (season_id)
+    FOREIGN KEY (team_id) REFERENCES teams (team_id),
+    FOREIGN KEY (season_id) REFERENCES seasons (season_id)
   )"
 )
 
 ```
-
 
 ```{r duckdb_players}
 
@@ -379,6 +379,37 @@ team_ids_input %>%
 
 ```
 
+```{r insert_seasons}
+
+tibble(season_id = seq(1950, 2099, 1)) %>% 
+  mutate(
+    season = paste(season_id-1, season_id %%100, sep = "-")
+  ) %>% 
+  dbAppendTable(duck.con, "seasons", .)
+
+```
+
+```{r insert_team_seas}
+
+bigballR::teamids %>% 
+  rename(team_seas_id = ID, conf = Conference) %>% 
+  rename_with(str_to_lower) %>% 
+  left_join(
+    y = tbl(duck.con, "seasons") %>% 
+      collect(),
+    by = "season"
+  ) %>% 
+  mutate(i = row_number()) %>% 
+  left_join(
+    y = tbl(duck.con, "teams") %>% 
+      select(team_id, ncaa_name) %>% 
+      collect(),
+    by = c("team" = "ncaa_name")
+  ) %>% 
+  select(team_seas_id, season_id, team_id, conf) %>% 
+  dbAppendTable(duck.con, "team_season", .)
+
+```
 
 ```{r get_games}
 
