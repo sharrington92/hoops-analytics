@@ -1,0 +1,222 @@
+---
+title: "Get Play-by-Play Data"
+format: html
+---
+
+## Setup
+
+```{r setup_packages}
+library(tidyverse)
+library(duckdb)
+library(DBI)
+library(bigballR)
+
+
+```
+
+
+```{r setup}
+
+
+
+
+```
+
+
+
+```{r inputs}
+
+dates <- seq.Date(
+  from = ymd("2023-11-06"),
+  to = ymd("2024-4-8"),
+  by = "1 day"
+)
+
+
+
+
+```
+
+
+```{r setup_duckdb}
+# Create/reference
+ddb <- duckdb(file.path("data", "hoopsdb.duckdb"))
+
+# Connect
+duck.con <- dbConnect(ddb)
+```
+
+
+## Data Model
+
+### Create database tables
+
+We need to create tables in the database to store games data.
+
+```{r duckdb_teams}
+
+dbSendQuery(
+  duck.con,
+  "CREATE TABLE IF NOT EXISTS teams (
+    team_id TEXT,
+    team TEXT
+  )"
+)
+
+```
+
+```{r duckdb_players}
+
+dbSendQuery(
+  duck.con,
+  "CREATE TABLE IF NOT EXISTS players (
+    player_id TIME,
+    player_name TEXT, 
+    player_name_last TEXT,
+    player_name_first TEXT
+  )"
+)
+
+```
+
+
+```{r duckdb_coach}
+
+dbSendQuery(
+  duck.con,
+  "CREATE TABLE IF NOT EXISTS rosters (
+    coach_id TEXT PRIMARY KEY,
+    coach_name TEXT, 
+    coach_name_last TEXT,
+    coach_name_first TEXT
+  )"
+)
+
+```
+
+
+```{r duckdb_roster}
+
+dbSendQuery(
+  duck.con,
+  "CREATE TABLE IF NOT EXISTS rosters (
+    roster_id TEXT PRIMARY KEY,
+    player_id TEXT,
+    team_id TEXT, 
+    season_id TEXT,
+    coach_id TEXT,
+    
+    FOREIGN KEY (player_id) REFERENCES players (player_id),
+    FOREIGN KEY (team_id) REFERENCES teams (team_id),
+    FOREIGN KEY (season_id) REFERENCES seasons (season_id),
+    FOREIGN KEY (coach_id) REFERENCES players (coach_id),
+  )"
+)
+
+```
+
+
+```{r duckdb_games}
+
+dbSendQuery(
+  duck.con,
+  "CREATE TABLE IF NOT EXISTS games (
+    game_id TEXT,
+    box_id TEXT,
+    date DATE,
+    start_time TIME,
+    home TEXT, 
+    away TEXT, 
+    home_score INT,
+    away_score INT,
+    attendance INT,
+    neutral_site BOOL,
+    home_win TINYINT,
+    home_loss TINYINT,
+    away_win TINYINT,
+    away_loss TINYINT
+  )"
+)
+
+```
+
+
+```{r duckdb_box}
+
+dbSendQuery(
+  duck.con,
+  "CREATE TABLE IF NOT EXISTS box (
+    game_id TEXT,
+    player TEXT,
+    tech INT,
+    fouls INT,
+    blocks INT,
+    steals INT,
+    turnover INT,
+    assist INT,
+    rebound_total INT,
+    rebound_def INT,
+    rebound_off INT,
+    points INT,
+    freethrow_pct DECIMAL(6, 3)
+  )"
+)
+
+```
+
+### Populate tables
+
+```{r get_games}
+
+lapply(dates, \(d){
+  print(d)
+  tryCatch({
+    g <- bigballR::get_date_games(date = format(d, "%m/%d/%Y")) %>% 
+      as_tibble() %>% 
+      rename_with(str_to_lower) %>% 
+      rename_with(~str_replace(.x, "id$", "_id")) %>% 
+      rename_with(~str_replace(.x, "wins$", "win")) %>% 
+      rename_with(~str_replace(.x, "losses$", "loss")) %>% 
+      mutate(
+        date = mdy(date),
+        start_time = paste(date, start_time) %>% ymd_hm() %>% format("%T"),
+        across(
+          c(home_score, away_score, home_win, home_loss,
+            away_win, away_loss),
+          as.numeric
+        ),
+        attendance = str_replace(attendance, ",", "") %>% as.integer()
+      )
+      
+      g %>% 
+      dbWriteTable(duck.con, "games", ., append = TRUE)
+  },
+  error = function(e) {
+    message("API call failed: ", e$message)
+    return(NULL)
+  })
+  
+  
+})
+
+
+```
+
+
+```{r}
+bigballR::get_box_scores(game_ids = "3954955")
+teams <- bigballR::get_team_stats()
+bigballR::get_team_roster(team.id = 450680)
+
+
+colnames(games)
+
+nrow(games) == length(unique(games$GameID))
+
+dbListTables(duck.con)
+
+
+
+dbGetQuery(duck.con, "SELECT COUNT(game_id) FROM games")
+```
+
