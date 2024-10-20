@@ -12,13 +12,25 @@ library(DBI)
 library(bigballR)
 library(duckplyr)
 library(ncaahoopR)
+library(rvest)
 
 ```
 
 
 ```{r setup}
 
+drop.table <- function(table){
+  dbSendQuery(duck.con, paste(
+    "DROP TABLE", table
+  ))
+  
+}
 
+trunc.table <- function(table){
+  dbSendQuery(duck.con, paste(
+    "TRUNCATE TABLE", table
+  ))
+}
 
 
 ```
@@ -65,117 +77,24 @@ ddb <- duckdb(file.path("data", "hoopsdb.duckdb"))
 duck.con <- dbConnect(ddb)
 ```
 
-bigballR package had error in get_team_roster() function. Made a pull request with the fix, use this temporarily until approved.
-
-```{r temp_fix}
-
-get_team_roster <-
-  function(team.id = NA,
-           season = NA,
-           team.name = NA,
-           use_file = F,
-           save_file = F,
-           base_path = NA,
-           overwrite = F) {
-
-    # If the user doesn't know id and instead gives a team name and season searches team DB for ID
-    # This can only be done since 16-17 at the moment
-    if (is.na(team.id) & !is.na(team.name) & !is.na(season)) {
-      team.id <-
-        bigballR::teamids$ID[which(bigballR::teamids$Team == team.name & bigballR::teamids$Season == season)]
-    } else if(is.na(team.id) & is.na(team.name) & is.na(season)){
-      message("Improper Request")
-      return(NULL)
-    }
-
-    #Pull html for the team page
-    url_text <- paste0("https://stats.ncaa.org/teams/", team.id)
-    file_dir <- paste0(base_path, "team_schedule/")
-    file_path <- paste0(file_dir, team.id, ".html")
-    isUrlRead <- F
-
-    # Give user option to save raw html file (to make future processing more efficient)
-    if (save_file & !is.na(base_path) & (!file.exists(file_path) | overwrite)) {
-      isUrlRead <- T
-      file_url <- url(url_text, headers = c("User-Agent" = "My Custom User Agent"))
-      html <- readLines(con = file_url, warn=F)
-      close(file_url)
-      dir.create(file_dir, recursive = T, showWarnings = F)
-      writeLines(html, file_path)
-    } else if (file.exists(file_path) & use_file) {
-      html <- readLines(file_path, warn=F)
-    } else {
-      isUrlRead <- T
-      file_url <- url(url_text, headers = c("User-Agent" = "My Custom User Agent"))
-      html <- readLines(con = file_url, warn=F)
-      close(file_url)
-    }
-
-    #Find link to the team roster page
-    roster_link <- html[which(grepl("Roster", html))]
-    roster_link <-
-      stringr::str_extract_all(roster_link, "(?<=\\\")(.*)(?=[\\\"])")
-    roster_url <- paste0("https://stats.ncaa.org", roster_link)
-    roster_url <- paste0("https://stats.ncaa.org/teams/", team.id, "/roster")
-
-
-    #Read html for the roster page and format it so it can be usabl
-
-    file_dir <- paste0(base_path, "team_roster/")
-    file_path <- paste0(file_dir, team.id, ".html")
-
-    if (save_file & !is.na(base_path) & (!file.exists(file_path) | overwrite)) {
-      isUrlRead <- T
-      file_url <- url(roster_url, headers = c("User-Agent" = "My Custom User Agent"))
-      html <- readLines(con = file_url, warn=F)
-      close(file_url)
-      dir.create(file_dir, recursive = T, showWarnings = F)
-      writeLines(html, file_path)
-    } else if (file.exists(file_path) & use_file) {
-      html <- readLines(file_path, warn=F)
-    } else {
-      isUrlRead <- T
-      file_url <- url(roster_url, headers = c("User-Agent" = "My Custom User Agent"))
-      html <- readLines(con = file_url, warn=F)
-      close(file_url)
-    }
-
-    table <- XML::readHTMLTable(html)[[1]][, 1:7] %>%
-      mutate(across(everything(), as.character))
-    # Return the more usable roster page
-    player <- table$Name
-    clean_name <- player
-    format <- gsub("[^[:alnum:] ]", "", clean_name)
-    format <- toupper(gsub("\\s+",".", format))
-    player_name <- gsub("(\\.JR\\.|\\.SR\\.|\\.J\\.R\\.|\\.JR\\.|JR\\.|SR\\.|\\.SR|\\.JR|\\.SR|\\.III|\\.II|\\.IV)$","", format)
-    player_name <- trimws(player_name)
-
-    table$Player <- player_name
-    table$CleanName <- clean_name
-    table$HtInches <- unname(sapply(table$Height, function(x){
-      a = as.numeric(strsplit(x,"-")[[1]])
-      12*a[1] + a[2]
-    }))
-    names(table)[names(table) == "GP"] <- "GamesPlayed"
-    names(table)[names(table) == "GS"] <- "GamesStarted"
-    names(table)[names(table) == "#"] <- "Jersey"
-
-    if (isUrlRead) {
-      Sys.sleep(0.5)
-    }
-    return(table)
-  }
-
-```
-
-
 ## Data Model
 
 ### Create database tables
 
-We need to create tables in the database to store games data.
+We need to create tables in the database to store games data. The relational data model will contain the following tables:
+
+- schools (dimension)
+- seasons (dimension)
+- players (dimension)
+- coaches (dimension)
+- teams (dimension): intersection between school and season.
+- rosters (dimension): intersection between team, coach, and players
+- games (fact)
+- boxscores (fact)
+- play_by_play (fact)
 
 ```{r duckdb_school}
+#| eval: false
 
 dbSendQuery(
   duck.con,
@@ -196,6 +115,7 @@ dbSendQuery(
 ```
 
 ```{r duckdb_seasons}
+#| eval: false
 
 dbSendQuery(
   duck.con,
@@ -208,20 +128,24 @@ dbSendQuery(
 ```
 
 ```{r duckdb_players}
+#| eval: false
 
 dbSendQuery(
   duck.con,
   "CREATE TABLE IF NOT EXISTS players (
     player_id INT PRIMARY KEY,
-    player_name TEXT, 
-    player_name_last TEXT,
-    player_name_first TEXT
+    name TEXT, 
+    name_last TEXT,
+    name_first TEXT,
+    hometown TEXT,
+    high_school TEXT
   )"
 )
 
 ```
 
 ```{r duckdb_coach}
+#| eval: false
 
 dbSendQuery(
   duck.con,
@@ -236,6 +160,7 @@ dbSendQuery(
 ```
 
 ```{r duckdb_team}
+#| eval: false
 
 dbSendQuery(
   duck.con,
@@ -252,24 +177,34 @@ dbSendQuery(
 ```
 
 ```{r duckdb_roster}
+#| eval: false
+
 
 dbSendQuery(
   duck.con,
-  "CREATE TABLE IF NOT EXISTS rosters (
-    roster_id INT PRIMARY KEY,
-    coach_id INT,
-    player_id INT,
+  "CREATE SEQUENCE IF NOT EXISTS roster_id_seq START 1;
+   CREATE TABLE IF NOT EXISTS rosters (
+    roster_id INT DEFAULT nextval('roster_id_seq'),
     team_id INT, 
+    player_id INT,
+    games_play INT,
+    games_start INT,
+    jersey INT,
+    class TEXT,
+    position TEXT,
+    height_in DECIMAL(6, 3),
     
+    UNIQUE(roster_id),
+    PRIMARY KEY (team_id, player_id),
     FOREIGN KEY (player_id) REFERENCES players (player_id),
-    FOREIGN KEY (team_id) REFERENCES teams (team_id),
-    FOREIGN KEY (coach_id) REFERENCES players (coach_id),
-  )"
+    FOREIGN KEY (team_id) REFERENCES teams (team_id)
+  );"
 )
 
 ```
 
 ```{r duckdb_games}
+#| eval: false
 
 dbSendQuery(
   duck.con,
@@ -294,7 +229,8 @@ dbSendQuery(
 ```
 
 ```{r duckdb_box}
-
+#| eval: false
+#| 
 dbSendQuery(
   duck.con,
   "CREATE TABLE IF NOT EXISTS box (
@@ -320,7 +256,8 @@ dbSendQuery(
 ```
 
 ```{r duckdb_pbp}
-
+#| eval: false
+#| 
 dbSendQuery(
   duck.con,
   "CREATE TABLE IF NOT EXISTS play_by_play (
@@ -413,31 +350,68 @@ bigballR::teamids %>%
 
 ```
 
-To create the players dimension table, we first must get all the players from the team rosters.
+To create the players dimension table, we first must get all the players from the team rosters as the player_id is inside the url for each player name. We'll need to create our own function to get the players and the player_id from the rosters and insert them into a temporary table. 
 
-```{r players_prep}
+```{r prep_roster}
 #| eval: false
+get_rosters <- function(team.id){
+    
+    url <- paste0("https://stats.ncaa.org/teams/", team.id, "/roster")
+    
+    webpage <- read_html(url)
+    
+    tables <- webpage %>% html_nodes("table")
+    
+    # Extract the first table (modify the index if necessary)
+    roster_table <- tables[[1]] %>% html_table(fill = TRUE)
+    
+    # Extract the table node again to access the HTML elements
+    roster_table_node <- tables[[1]]
+    
+    # Convert the table to a list of rows
+    rows <- roster_table_node %>% html_nodes("tr")
+    
+    player_ids <-sapply(rows[-1], \(x){
+      html_nodes(x, "td")[4]  %>%
+        html_node("a") %>%
+        html_attr("href") %>% 
+        str_extract("(?<=players/).*")
+    })
+    
+    roster_table %>% 
+      bind_cols(
+        tibble(player_id = player_ids)
+      ) %>% 
+      rename_with(str_to_lower) %>% 
+      rename(
+        player_name = name,
+        games_played = gp,
+        games_start = gs,
+        jersey = `#`,
+        high_school = `high school`
+      ) %>% 
+      return()
+}
 
 # Create temp table to store raw rosters
 dbSendQuery(
   duck.con, 
-  "CREATE TABLE temp_roster_raw (
+  "CREATE temp TABLE temp_roster (
     team_id INT,
-    GamesPlayed TEXT,
-    GamesStarted TEXT,
-    Jersey TEXT,
-    Name TEXT,
-    Class TEXT,
-    Position TEXT,
-    Height TEXT,
-    Player TEXT,
-    CleanName TEXT,
-    HtInches TEXT
+    player_id TEXT,
+    player_name TEXT,
+    games_played TEXT,
+    games_start TEXT,
+    jersey TEXT,
+    class TEXT,
+    position TEXT,
+    height TEXT,
+    hometown TEXT,
+    high_school TEXT
   )
   "
 )
 
-# For each team, get roster and insert to db
 tbl(duck.con, "teams") %>% 
   filter(!is.na(conf)) %>% 
   filter(season_id == 2024) %>% 
@@ -446,39 +420,81 @@ tbl(duck.con, "teams") %>%
   pull(team_id) %>%
   lapply(\(t){
     print(t)
-    get_team_roster(team.id = t) %>% 
+    get_rosters(team.id = t) %>% 
       mutate(team_id = t) %>% 
-      dbAppendTable(duck.con, "temp_roster_raw", .)
+      dbAppendTable(duck.con, "temp_roster", .)
   })
-
-
 
 ```
 
+We'll extract the player information to populate the players table.
 
 ```{r insert_players}
+#| eval: false
 
-tbl(duck.con, "temp_roster_raw") %>% 
-  select(Player, CleanName, Name) %>% 
-  mutate(
-    player_name_last = grep(
-      "(?<=[:space:]).*", CleanName
-    )
-  )
-
+dbSendQuery(
+  duck.con,
+  "INSERT INTO players
+    SELECT 
+      CAST(player_id as INT) AS player_id, 
+      player_name as name, 
+      REGEXP_EXTRACT(player_name, '^(\\S+)', 1) AS name_first,
+      TRIM(LTRIM(player_name, name_first)) AS name_last,
+      hometown, 
+      high_school
+    FROM temp_roster
+  "
+)
 ```
 
 
 ```{r insert_rosters}
+#| eval: false
 
-
-
-d <- get_team_roster(team.id = "450680")
+dbSendQuery(
+  duck.con, 
+  "INSERT INTO rosters
+  SELECT
+    nextval('roster_id_seq') AS roster_id,
+    team_id,
+    CAST(player_id AS INT) AS player_id,
+    CAST(games_played AS INT) AS games_play,
+    CAST(games_start AS INT) AS games_start,
+    CAST(jersey AS INT) AS jersey,
+    class,
+    position,
+    (
+      TRY_CAST(height[1] AS DOUBLE)*12 + TRY_CAST(height[3:4] AS DOUBLE)
+    ) AS height_in
+  FROM temp_roster
+  "
+)
 
 ```
 
 
-```{r insert_games}
+```{r prep_games}
+#| eval: false
+
+dbSendQuery(
+  duck.con,
+  "CREATE TEMP TABLE IF NOT EXISTS games_temp (
+    game_id TEXT,
+    box_id TEXT,
+    date DATE,
+    start_time TEXT,
+    home TEXT, 
+    away TEXT, 
+    home_score TEXT,
+    away_score TEXT,
+    attendance TEXT,
+    neutral_site TEXT,
+    home_win TEXT,
+    home_loss TEXT,
+    away_win TEXT,
+    away_loss TEXT
+  )"
+)
 
 lapply(dates, \(d){
   print(d)
@@ -492,7 +508,8 @@ lapply(dates, \(d){
       filter(!is.na(game_id)) %>% # This filters out cancelled games
       mutate(
         date = mdy(date),
-        start_time = paste(date, start_time) %>% ymd_hm() %>% format("%T"),
+        start_time = paste(date, start_time) %>% 
+          ymd_hm() %>% format("%T"),
         across(
           c(home_score, away_score, home_win, home_loss,
             away_win, away_loss),
@@ -502,7 +519,7 @@ lapply(dates, \(d){
       )
       
       g %>% 
-      dbWriteTable(duck.con, "games", ., append = TRUE)
+      dbAppendTable(duck.con, "games_temp", ., append = TRUE)
   },
   error = function(e) {
     message("API call failed: ", e$message)
@@ -515,7 +532,27 @@ lapply(dates, \(d){
 
 ```
 
+
+```{r insert_rosters}
+#| eval: false
+
+
+tbl(duck.con, "games_temp") %>% 
+  glimpse()
+
+
+dbListTables(duck.con)
+
+trunc.table("games")
+
+
+```
+
+
+
 ```{r sandbox}
+#| eval: false
+#| 
 bigballR::get_box_scores(game_ids = "3954955")
 bigballR::get_team_stats()
 get_team_roster(team.id = "450680") # error
@@ -543,21 +580,3 @@ games.con %>%
   filter(is.na(home_win))
 
 ```
-
-```{r}
-
-dbSendQuery(
-  duck.con,
-  "CREATE TABLE IF NOT EXISTS games_temp AS 
-  SELECT * FROM games
-  WHERE game_id IS NOT NULL"
-)
-
-dbSendQuery(
-  duck.con,
-  "DROP TABLE games_temp"
-)
-
-
-```
-
