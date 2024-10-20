@@ -33,23 +33,23 @@ dates <- seq.Date(
   by = "1 day"
 )
 
-team_ids_input <- read_lines(
+school_ids_input <- read_lines(
     file.path("data", "html-extract-ncaa-team-ids.txt"),
     skip = 0
   ) %>% 
   as_tibble() %>% 
   mutate(
-    team_id = str_extract(value, '(?<=value=\\")([0-9]+)'),
+    school_id = str_extract(value, '(?<=value=\\")([0-9]+)'),
     ncaa_name = str_extract(value, '(?<=\\>).*(?=\\<)')
   ) %>% 
-  select(team_id, ncaa_name) %>% 
+  select(school_id, ncaa_name) %>% 
   left_join(
     y = ncaahoopR::ncaa_colors %>% 
       select(-c(color_3, conference)),
     by = "ncaa_name"
   ) %>% 
   group_by(ncaa_name) %>% 
-  slice_min(order_by = as.numeric(team_id), n = 1) %>% 
+  slice_min(order_by = as.numeric(school_id), n = 1) %>% 
   ungroup()
 
 
@@ -175,12 +175,12 @@ get_team_roster <-
 
 We need to create tables in the database to store games data.
 
-```{r duckdb_teams}
+```{r duckdb_school}
 
 dbSendQuery(
   duck.con,
-  "CREATE TABLE IF NOT EXISTS teams (
-    team_id INT PRIMARY KEY,
+  "CREATE TABLE IF NOT EXISTS schools (
+    school_id INT PRIMARY KEY,
     ncaa_name TEXT,
     espn_name TEXT,
     primary_color TEXT,
@@ -202,22 +202,6 @@ dbSendQuery(
   "CREATE TABLE IF NOT EXISTS seasons (
     season_id INT PRIMARY KEY,
     season TEXT
-  )"
-)
-
-```
-
-```{r duckdb_team_season}
-
-dbSendQuery(
-  duck.con,
-  "CREATE TABLE IF NOT EXISTS team_season (
-    team_seas_id INT PRIMARY KEY,
-    season_id INT,
-    team_id INT,
-    conf TEXT,
-    FOREIGN KEY (team_id) REFERENCES teams (team_id),
-    FOREIGN KEY (season_id) REFERENCES seasons (season_id)
   )"
 )
 
@@ -251,6 +235,22 @@ dbSendQuery(
 
 ```
 
+```{r duckdb_team}
+
+dbSendQuery(
+  duck.con,
+  "CREATE TABLE IF NOT EXISTS teams (
+    team_id INT PRIMARY KEY,
+    season_id INT,
+    school_id INT,
+    conf TEXT,
+    FOREIGN KEY (school_id) REFERENCES schools (school_id),
+    FOREIGN KEY (season_id) REFERENCES seasons (season_id)
+  )"
+)
+
+```
+
 ```{r duckdb_roster}
 
 dbSendQuery(
@@ -260,11 +260,9 @@ dbSendQuery(
     coach_id INT,
     player_id INT,
     team_id INT, 
-    season_id INT,
     
     FOREIGN KEY (player_id) REFERENCES players (player_id),
     FOREIGN KEY (team_id) REFERENCES teams (team_id),
-    FOREIGN KEY (season_id) REFERENCES seasons (season_id),
     FOREIGN KEY (coach_id) REFERENCES players (coach_id),
   )"
 )
@@ -373,13 +371,16 @@ dbSendQuery(
 
 ### Populate tables
 
-```{r insert_teams}
-team_ids_input %>% 
-  dbAppendTable(duck.con, "teams", .)
+```{r insert_schools}
+#| eval: false
+
+school_ids_input %>% 
+  dbAppendTable(duck.con, "schools", .)
 
 ```
 
 ```{r insert_seasons}
+#| eval: false
 
 tibble(season_id = seq(1950, 2099, 1)) %>% 
   mutate(
@@ -389,10 +390,11 @@ tibble(season_id = seq(1950, 2099, 1)) %>%
 
 ```
 
-```{r insert_team_seas}
+```{r insert_teams}
+#| eval: false
 
 bigballR::teamids %>% 
-  rename(team_seas_id = ID, conf = Conference) %>% 
+  rename(team_id = ID, conf = Conference) %>% 
   rename_with(str_to_lower) %>% 
   left_join(
     y = tbl(duck.con, "seasons") %>% 
@@ -401,17 +403,82 @@ bigballR::teamids %>%
   ) %>% 
   mutate(i = row_number()) %>% 
   left_join(
-    y = tbl(duck.con, "teams") %>% 
-      select(team_id, ncaa_name) %>% 
+    y = tbl(duck.con, "schools") %>% 
+      select(school_id, ncaa_name) %>% 
       collect(),
     by = c("team" = "ncaa_name")
   ) %>% 
-  select(team_seas_id, season_id, team_id, conf) %>% 
-  dbAppendTable(duck.con, "team_season", .)
+  select(team_id, season_id, school_id, conf) %>% 
+  dbAppendTable(duck.con, "teams", .)
 
 ```
 
-```{r get_games}
+To create the players dimension table, we first must get all the players from the team rosters.
+
+```{r players_prep}
+#| eval: false
+
+# Create temp table to store raw rosters
+dbSendQuery(
+  duck.con, 
+  "CREATE TABLE temp_roster_raw (
+    team_id INT,
+    GamesPlayed TEXT,
+    GamesStarted TEXT,
+    Jersey TEXT,
+    Name TEXT,
+    Class TEXT,
+    Position TEXT,
+    Height TEXT,
+    Player TEXT,
+    CleanName TEXT,
+    HtInches TEXT
+  )
+  "
+)
+
+# For each team, get roster and insert to db
+tbl(duck.con, "teams") %>% 
+  filter(!is.na(conf)) %>% 
+  filter(season_id == 2024) %>% 
+  select(team_id) %>% 
+  collect() %>%
+  pull(team_id) %>%
+  lapply(\(t){
+    print(t)
+    get_team_roster(team.id = t) %>% 
+      mutate(team_id = t) %>% 
+      dbAppendTable(duck.con, "temp_roster_raw", .)
+  })
+
+
+
+```
+
+
+```{r insert_players}
+
+tbl(duck.con, "temp_roster_raw") %>% 
+  select(Player, CleanName, Name) %>% 
+  mutate(
+    player_name_last = grep(
+      "(?<=[:space:]).*", CleanName
+    )
+  )
+
+```
+
+
+```{r insert_rosters}
+
+
+
+d <- get_team_roster(team.id = "450680")
+
+```
+
+
+```{r insert_games}
 
 lapply(dates, \(d){
   print(d)
@@ -448,14 +515,7 @@ lapply(dates, \(d){
 
 ```
 
-```{r get_rosters}
-
-get_team_roster(team.id = "450680")
-
-```
-
-
-```{r}
+```{r sandbox}
 bigballR::get_box_scores(game_ids = "3954955")
 bigballR::get_team_stats()
 get_team_roster(team.id = "450680") # error
