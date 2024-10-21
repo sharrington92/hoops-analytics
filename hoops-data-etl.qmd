@@ -45,24 +45,7 @@ dates <- seq.Date(
   by = "1 day"
 )
 
-school_ids_input <- read_lines(
-    file.path("data", "html-extract-ncaa-team-ids.txt"),
-    skip = 0
-  ) %>% 
-  as_tibble() %>% 
-  mutate(
-    school_id = str_extract(value, '(?<=value=\\")([0-9]+)'),
-    ncaa_name = str_extract(value, '(?<=\\>).*(?=\\<)')
-  ) %>% 
-  select(school_id, ncaa_name) %>% 
-  left_join(
-    y = ncaahoopR::ncaa_colors %>% 
-      select(-c(color_3, conference)),
-    by = "ncaa_name"
-  ) %>% 
-  group_by(ncaa_name) %>% 
-  slice_min(order_by = as.numeric(school_id), n = 1) %>% 
-  ungroup()
+
 
 
 
@@ -311,6 +294,25 @@ dbSendQuery(
 ```{r insert_schools}
 #| eval: false
 
+school_ids_input <- read_lines(
+    file.path("data", "html-extract-ncaa-team-ids.txt"),
+    skip = 0
+  ) %>% 
+  as_tibble() %>% 
+  mutate(
+    school_id = str_extract(value, '(?<=value=\\")([0-9]+)'),
+    ncaa_name = str_extract(value, '(?<=\\>).*(?=\\<)')
+  ) %>% 
+  select(school_id, ncaa_name) %>% 
+  left_join(
+    y = ncaahoopR::ncaa_colors %>% 
+      select(-c(color_3, conference)),
+    by = "ncaa_name"
+  ) %>% 
+  group_by(ncaa_name) %>% 
+  slice_min(order_by = as.numeric(school_id), n = 1) %>% 
+  ungroup()
+
 school_ids_input %>% 
   dbAppendTable(duck.con, "schools", .)
 
@@ -533,17 +535,37 @@ lapply(dates, \(d){
 ```
 
 
-```{r insert_rosters}
+```{r insert_games}
 #| eval: false
 
 
-tbl(duck.con, "games_temp") %>% 
+tbl(duck.con, "teams") %>% glimpse()
+tbl(duck.con, "schools") %>% glimpse()
+tbl(duck.con, "games_temp") %>% glimpse()
+
+dbGetQuery(
+  duck.con, 
+  "--INSERT INTO games
+  SELECT
+    CAST(game_id AS INT) AS game_id,
+    CAST(box_id AS INT) AS box_id,
+    date,
+    start_time,
+    th.team_id AS home_team_id,
+    ta.team_id AS away_team_id,
+    CAST(home_score AS INT) AS home_score,
+    CAST(away_score AS INT) AS away_score,
+    CAST(attendance AS INT) AS attendance
+    
+  FROM 
+    games_temp gt
+    JOIN schools sh ON sh.ncaa_name = gt.home
+    JOIN teams th ON sh.school_id = th.school_id
+    JOIN schools sa ON sa.ncaa_name = gt.away
+    JOIN teams ta ON sa.school_id = ta.school_id
+  "
+) %>% 
   glimpse()
-
-
-dbListTables(duck.con)
-
-trunc.table("games")
 
 
 ```
@@ -580,3 +602,119 @@ games.con %>%
   filter(is.na(home_win))
 
 ```
+
+
+```{r}
+
+inner_join(
+  tbl(duck.con, "teams"),
+  tbl(duck.con, "schools")
+) %>% 
+  collect() %>%
+  View()
+
+teams <- tbl(duck.con, "teams") %>% collect()
+schools <- tbl(duck.con, "schools") %>% collect()
+
+```
+
+
+```{r}
+
+
+date2 <- gsub("[/]", "%2F", date)
+url_text <- paste0("https://stats.ncaa.org/season_divisions/", 
+                   seasonid, "/scoreboards?game_date=", date2, "&conference_id=", 
+                   conferenceid, "&commit=Submit")
+file_dir <- paste0(base_path, "date_games/")
+file_path <- paste0(file_dir, date2, "_", conferenceid, 
+                    ".html")
+
+file_url <- url(url_text, headers = c(`User-Agent` = "My Custom User Agent"))
+html <- readLines(con = file_url, warn = F)
+close(file_url)
+
+
+
+{
+  season.id <- "18221"
+  conference.id <- "922"
+  date <- ymd("2023-11-6")
+  
+  
+  base.url <- paste0(
+    "https://stats.ncaa.org/season_divisions/", 
+    season.id, "/scoreboards?game_date=", date, "&conference_id=", 
+    conference.id, "&commit=Submit"
+  )
+  url <- url(base.url, headers = c(`User-Agent` = "My Custom User Agent"))
+  
+  webpage <- read_html(base.url)
+  XML::xml(temp)
+  url.read <- read_lines(url) 
+  x1 <- url.read %>% XML::xmlParseString()
+  x
+  View(temp)
+  
+  close(url)
+  
+  table <- XML::readHTMLTable(temp)
+  View(table[[1]])
+  
+  webpage <- read_html(base.url)
+  tables <- webpage %>% html_nodes("table")
+  
+  tables[[1]] %>%  # %>% html_table(fill = TRUE) #%>% 
+    View()
+  
+  # Extract the first table (modify the index if necessary)
+  roster_table <- tables[[1]] %>% html_table(fill = TRUE)
+  
+  # Extract the table node again to access the HTML elements
+  roster_table_node <- tables[[1]]
+  
+  # Convert the table to a list of rows
+  rows <- roster_table_node %>% html_nodes("tr")
+  
+  player_ids <-sapply(rows[-1], \(x){
+    html_nodes(x, "td")[4]  %>%
+      html_node("a") %>%
+      html_attr("href") %>% 
+      str_extract("(?<=players/).*")
+  })
+  
+  roster_table %>% 
+    bind_cols(
+      tibble(player_id = player_ids)
+    ) %>% 
+    rename_with(str_to_lower) %>% 
+    rename(
+      player_name = name,
+      games_played = gp,
+      games_start = gs,
+      jersey = `#`,
+      high_school = `high school`
+    ) %>% 
+    return()
+  
+}
+```
+
+
+```{r}
+
+u <- "https://stats.ncaa.org/season_divisions/18221/scoreboards?game_date=2023-11-06&conference_id=922&commit=Submit"
+
+req <- request(u) %>% 
+  req_headers(`User-Agent` = "My Custom User Agent")
+
+resp <- req %>% 
+  req_perform()
+
+r2 <- resp %>% 
+  resp_body_string()
+
+r2
+
+```
+
